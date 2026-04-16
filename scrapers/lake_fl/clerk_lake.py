@@ -43,19 +43,15 @@ class LakeClerkScraper:
             self.config["code_enforcement_filer_regex"], re.IGNORECASE,
         )
 
-    # ------------------------------------------------------------------
-
     def pull_code_enforcement_candidates(
         self, date_from: date, date_to: date
     ) -> pd.DataFrame:
-        """Pull primary CE doc types (GOV + secondary) and filter to municipal filers.
-
-        Returns a DataFrame of candidate code-enforcement recordings — these
-        are rows where the Indirect Name matches a government-entity pattern
-        like "CITY OF ..." or "LAKE COUNTY POL SUBDIVISION".
-        """
-        codes = [d["code"] for d in self.config["doc_types"]["primary"]]
-        df = self.client.search_doc_types(codes, date_from, date_to)
+        """Pull primary CE doc types (GOV + secondary) and filter to municipal filers."""
+        primary = self.config["doc_types"]["primary"]
+        ids = [d["id"] for d in primary]
+        codes = [d["code"] for d in primary]
+        display = ", ".join(f"{d['name']} ({d['code']})" for d in primary)
+        df = self.client.search_doc_types(ids, date_from, date_to, display_label=display)
 
         if df.empty:
             return df
@@ -75,8 +71,10 @@ class LakeClerkScraper:
         self, date_from: date, date_to: date
     ) -> pd.DataFrame:
         """Pull satisfaction/release doc types for the same date range."""
-        codes = [d["code"] for d in self.config["doc_types"]["satisfactions"]]
-        df = self.client.search_doc_types(codes, date_from, date_to)
+        sats = self.config["doc_types"]["satisfactions"]
+        ids = [d["id"] for d in sats]
+        display = ", ".join(f"{d['name']} ({d['code']})" for d in sats)
+        df = self.client.search_doc_types(ids, date_from, date_to, display_label=display)
         df = self._normalize_column_names(df) if not df.empty else df
         logger.info(
             "Pulled %d satisfactions for range %s..%s", len(df), date_from, date_to,
@@ -86,8 +84,6 @@ class LakeClerkScraper:
     def download_document_pdf(self, instrument_number: str):
         """Delegate to base client (returns None until viewer URL is resolved)."""
         return self.client.download_document_pdf(instrument_number)
-
-    # ------------------------------------------------------------------
 
     def _is_government_filer(self, indirect_name: str) -> bool:
         if not indirect_name:
@@ -101,7 +97,6 @@ class LakeClerkScraper:
         df.columns = [
             re.sub(r'[^a-z0-9]+', '_', c.lower()).strip('_') for c in df.columns
         ]
-        # Common OnCore column rename map → canonical names
         rename = {
             "direct_name": "direct_name",
             "indirect_name": "indirect_name",
