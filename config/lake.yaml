@@ -7,47 +7,46 @@ fips: "12069"
 
 clerk:
   name: "Lake County Clerk of the Circuit Court and Comptroller"
-  platform: "oncore_acclaim"  # Harris Recording Solutions
+  platform: "oncore_acclaim"
   base_url: "https://officialrecords.lakecountyclerk.org"
   disclaimer_accept_url: "/search/Disclaimer"
   search_endpoint: "/search/SearchTypeDocType"
   csv_export_endpoint: "/Search/ExportCsv"
-  # Document viewer: resolved at runtime — see base/oncore_acclaim.py resolve_document_url()
-  # The public /Details/?TransactionItemId=X requires a session-derived internal ID, not the public instrument number.
 
 property_appraiser:
   name: "Lake County Property Appraiser"
   base_url: "https://www.lakecopropappr.com"
   search_endpoint: "/property-search.aspx"
-  parcel_id_name: "alt_key"  # Lake calls it "Alternate Key" or "Alt Key"
+  parcel_id_name: "alt_key"
 
-# Doc type codes used by the Lake clerk (discovered during Phase 0)
 doc_types:
   primary:
     - code: "GOV"
+      id: 30
       name: "GOVERNMENT RELATED"
       purpose: "primary_ce"
     - code: "J/L"
+      id: 31
       name: "JUDGMENT/LIEN"
       purpose: "secondary_ce"
     - code: "LN"
+      id: 35
       name: "LIEN"
       purpose: "secondary_ce"
     - code: "ORD"
+      id: 45
       name: "ORDER"
       purpose: "secondary_ce"
   satisfactions:
     - code: "SAT"
+      id: 55
       name: "SATISFACTION"
     - code: "JAS"
+      id: 32
       name: "JDGMT/ASGMT SATISFACTION"
 
-# Regex pattern for Indirect Name -- identifies rows that are code enforcement filings
-# (i.e., filed BY a government entity against a private owner)
 code_enforcement_filer_regex: '^(CITY OF |TOWN OF |VILLAGE OF |LAKE COUNTY |MUNICIPALITY OF ).+|.*POL SUBDIVISION.*|.*CODE ENFORCEMENT.*'
 
-# Known municipal filers in Lake County (for reference and QA)
-# These are the entities we expect to see filing code enforcement liens
 known_filers:
   - "CITY OF CLERMONT"
   - "CITY OF EUSTIS"
@@ -65,15 +64,12 @@ known_filers:
   - "TOWN OF MONTVERDE"
   - "LAKE COUNTY POL SUBDIVISION"
 
-# Rate limiting — be polite
 rate_limits:
-  clerk_requests_per_second: 0.33   # 1 every 3 seconds
+  clerk_requests_per_second: 0.33
   pa_requests_per_second: 0.33
-  pa_cache_days: 30                 # cache PA responses by identifier
+  pa_cache_days: 30
 
-# Parcel ID regex — Lake County Alt Key format (common FL patterns; tune after first run)
-# Examples: "26-18-24-0100-001-00100"  or "1234567"
 parcel_id_patterns:
-  - '\b\d{2}-\d{2}-\d{2}-\d{4}-\d{3}-\d{5}\b'   # long form with dashes
-  - '\bAlt(?:ernate)?\s*Key[:\s]+(\d{5,10})\b'   # labeled "Alt Key"
-  - '\bParcel\s*(?:ID|Number|#)[:\s]+([\d\-]+)\b'  # labeled "Parcel ID"
+  - '\b\d{2}-\d{2}-\d{2}-\d{4}-\d{3}-\d{5}\b'
+  - '\bAlt(?:ernate)?\s*Key[:\s]+(\d{5,10})\b'
+  - '\bParcel\s*(?:ID|Number|#)[:\s]+([\d\-]+)\b'
