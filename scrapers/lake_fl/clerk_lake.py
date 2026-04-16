@@ -92,23 +92,26 @@ class LakeClerkScraper:
 
     @staticmethod
     def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
-        """Lowercase, underscore-separated column names for internal use."""
+        """Lowercase, underscore-separated column names for internal use.
+
+        Handles both spaced ("Direct Name") and PascalCase ("DirectName") CSV
+        headers. The real Lake CSV export uses PascalCase — discovered during
+        first-run debugging.
+        """
+        def norm(name: str) -> str:
+            s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name)
+            s = re.sub(r'[^a-zA-Z0-9]+', '_', s)
+            return s.lower().strip('_')
+
         df = df.copy()
-        df.columns = [
-            re.sub(r'[^a-z0-9]+', '_', c.lower()).strip('_') for c in df.columns
-        ]
+        df.columns = [norm(c) for c in df.columns]
+
         rename = {
-            "direct_name": "direct_name",
-            "indirect_name": "indirect_name",
-            "record_date": "record_date",
-            "doc_type": "doc_type",
-            "book_page": "book_page",
-            "book_type": "book_type",
             "instrument": "instrument_number",
             "instrument_num": "instrument_number",
-            "doc_legal": "doc_legal",
+            "doc_legal_description": "doc_legal",
             "case": "case_number",
-            "consideration": "consideration",
+            "case_num": "case_number",
         }
         df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
         return df
