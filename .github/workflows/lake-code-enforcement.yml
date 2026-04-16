@@ -1,0 +1,54 @@
+name: Lake Code Enforcement
+
+# Triggers:
+# 1. Scheduled weekly run every Monday at 6am Eastern (10 UTC)
+# 2. Manual dispatch with custom date range - used for backfill and ad-hoc runs
+
+on:
+  schedule:
+    - cron: "0 10 * * 1"
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: "Start date (YYYY-MM-DD). Leave blank to run last 14 days."
+        required: false
+        default: ""
+      to_date:
+        description: "End date (YYYY-MM-DD). Leave blank to run last 14 days."
+        required: false
+        default: ""
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Lake code enforcement pipeline
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          LAKE_MASTER_SHEET_ID: ${{ secrets.LAKE_MASTER_SHEET_ID }}
+          LAKE_RUN_LOG_SHEET_ID: ${{ secrets.LAKE_RUN_LOG_SHEET_ID }}
+          DRIVE_COUNTY_DATA_FOLDER_ID: ${{ secrets.DRIVE_COUNTY_DATA_FOLDER_ID }}
+        run: |
+          if [ -n "${{ github.event.inputs.from_date }}" ] && [ -n "${{ github.event.inputs.to_date }}" ]; then
+            python run.py lake-code-enforcement \
+              --from "${{ github.event.inputs.from_date }}" \
+              --to   "${{ github.event.inputs.to_date }}"
+          else
+            python run.py lake-code-enforcement --last-days 14
+          fi
