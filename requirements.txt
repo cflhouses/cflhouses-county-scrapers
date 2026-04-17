@@ -7,3 +7,4 @@ google-auth>=2.25.0
 pdfplumber>=0.10.0
 beautifulsoup4>=4.12.0
 tenacity>=8.2.0
+playwright>=1.40.0
