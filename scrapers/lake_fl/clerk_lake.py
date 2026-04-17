@@ -1,8 +1,5 @@
 """
-Lake County, FL — clerk scraper.
-
-Thin wrapper over the OnCore Acclaim base client with Lake-specific config
-and a code-enforcement filtering helper.
+Lake County, FL - clerk scraper.
 """
 from __future__ import annotations
 
@@ -42,11 +39,14 @@ class LakeClerkScraper:
         self._filer_regex = re.compile(
             self.config["code_enforcement_filer_regex"], re.IGNORECASE,
         )
+        self._filer_exclude = [
+            s.upper() for s in self.config.get("filer_exclude_keywords", [])
+        ]
 
     def pull_code_enforcement_candidates(
         self, date_from: date, date_to: date
     ) -> pd.DataFrame:
-        """Pull primary CE doc types (GOV + secondary) and filter to municipal filers."""
+        """Pull primary CE doc types and filter to municipal filers."""
         primary = self.config["doc_types"]["primary"]
         ids = [d["id"] for d in primary]
         codes = [d["code"] for d in primary]
@@ -62,7 +62,7 @@ class LakeClerkScraper:
         ce_rows = df[df["is_ce_filer"]].copy()
         non_ce_rows = df[~df["is_ce_filer"]]
         logger.info(
-            "Pulled %d rows (%d CE, %d other-GOV) for doc types %s, %s..%s",
+            "Pulled %d rows (%d CE, %d excluded) for doc types %s, %s..%s",
             len(df), len(ce_rows), len(non_ce_rows), codes, date_from, date_to,
         )
         return ce_rows
@@ -82,22 +82,20 @@ class LakeClerkScraper:
         return df
 
     def download_document_pdf(self, instrument_number: str):
-        """Delegate to base client (returns None until viewer URL is resolved)."""
         return self.client.download_document_pdf(instrument_number)
 
     def _is_government_filer(self, indirect_name: str) -> bool:
         if not indirect_name:
             return False
-        return bool(self._filer_regex.match(indirect_name.strip()))
+        name = indirect_name.strip().upper()
+        for banned in self._filer_exclude:
+            if banned in name:
+                return False
+        return bool(self._filer_regex.match(name))
 
     @staticmethod
     def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
-        """Lowercase, underscore-separated column names for internal use.
-
-        Handles both spaced ("Direct Name") and PascalCase ("DirectName") CSV
-        headers. The real Lake CSV export uses PascalCase — discovered during
-        first-run debugging.
-        """
+        """Lowercase, underscore-separated column names. Handles PascalCase CSV."""
         def norm(name: str) -> str:
             s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name)
             s = re.sub(r'[^a-zA-Z0-9]+', '_', s)
@@ -105,7 +103,6 @@ class LakeClerkScraper:
 
         df = df.copy()
         df.columns = [norm(c) for c in df.columns]
-
         rename = {
             "instrument": "instrument_number",
             "instrument_num": "instrument_number",
