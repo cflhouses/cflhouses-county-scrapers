@@ -1,4 +1,4 @@
-"""Lake County Property Appraiser - real implementation with subdivision matching."""
+"""Lake County Property Appraiser - Playwright-driven implementation."""
 from __future__ import annotations
 
 import logging
@@ -8,15 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-import requests
-from bs4 import BeautifulSoup
-
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://lakecopropappr.com"
-SEARCH_PATH = "/property-search.aspx"
-DETAIL_PATH = "/property-details.aspx"
-DISCLAIMER_PATH = "/property-disclaimer.aspx"
+SEARCH_URL = BASE_URL + "/property-search.aspx"
+DETAIL_URL = BASE_URL + "/property-details.aspx"
 
 
 @dataclass
@@ -38,18 +34,48 @@ class PropertyRecord:
 
 
 class LakePropertyAppraiser:
-    def __init__(self, cache_ttl_days: int = 30, rate_limit_seconds: float = 3.0):
+    """Playwright-driven client. Spins up a single browser per instance."""
+
+    def __init__(self, cache_ttl_days: int = 30, rate_limit_seconds: float = 1.5):
         self.cache_ttl = timedelta(days=cache_ttl_days)
         self.rate_limit_seconds = rate_limit_seconds
         self._cache: Dict[str, tuple] = {}
         self._last_request_at: float = 0.0
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "CFL-County-Scraper/1.0 (contact: CFLHousesLLC@gmail.com)",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._page = None
         self._disclaimer_accepted = False
+
+    def _ensure_browser(self) -> None:
+        if self._page is not None:
+            return
+        from playwright.sync_api import sync_playwright
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(headless=True)
+        self._context = self._browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/121.0 Safari/537.36"
+            ),
+        )
+        self._page = self._context.new_page()
+        self._page.set_default_timeout(30000)
+        logger.info("PA: Playwright browser ready")
+
+    def close(self) -> None:
+        try:
+            if self._context is not None:
+                self._context.close()
+            if self._browser is not None:
+                self._browser.close()
+            if self._pw is not None:
+                self._pw.stop()
+        except Exception as e:
+            logger.warning("PA: error closing browser: %s", e)
+
+    def __del__(self):
+        self.close()
 
     def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
@@ -67,73 +93,65 @@ class LakePropertyAppraiser:
     def _cache_put(self, key: str, value) -> None:
         self._cache[key] = (datetime.now(), value)
 
-    def accept_disclaimer(self) -> None:
+    def _accept_disclaimer_if_needed(self) -> None:
         if self._disclaimer_accepted:
             return
+        self._ensure_browser()
         self._throttle()
+        self._page.goto(SEARCH_URL, wait_until="domcontentloaded")
         try:
-            self.session.get(BASE_URL + DISCLAIMER_PATH,
-                             params={"to": SEARCH_PATH}, timeout=30)
-        except requests.RequestException as e:
-            logger.warning("Disclaimer GET failed (continuing): %s", e)
+            btn = self._page.query_selector("a:has-text(\"I AGREE\"), input[value*=\"AGREE\"], img[alt*=\"AGREE\"]")
+            if btn is None:
+                btn = self._page.query_selector("a[href*=\"to=\"]")
+            if btn is not None:
+                btn.click()
+                self._page.wait_for_load_state("domcontentloaded")
+                logger.info("PA: clicked I AGREE on disclaimer")
+        except Exception as e:
+            logger.debug("PA: no disclaimer to click (%s)", e)
         self._disclaimer_accepted = True
 
-    def _extract_hidden_fields(self, soup: BeautifulSoup) -> Dict[str, str]:
-        fields = {}
-        for name in ["__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION",
-                     "__VIEWSTATEENCRYPTED", "__EVENTTARGET", "__EVENTARGUMENT",
-                     "__LASTFOCUS"]:
-            el = soup.find("input", attrs={"name": name})
-            if el is not None:
-                fields[name] = el.get("value", "") or ""
-        return fields
-
-    def _search(self, owner_name: str = "", subdivision: str = "",
-                address: str = "", city: str = "") -> List[str]:
-        """Submit search form POST and return Alt Keys from result page."""
-        if not self._disclaimer_accepted:
-            self.accept_disclaimer()
+    def _search(self, owner_name: str = "", subdivision: str = "") -> List[str]:
+        self._accept_disclaimer_if_needed()
         self._throttle()
-        resp = self.session.get(BASE_URL + SEARCH_PATH, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        hidden = self._extract_hidden_fields(soup)
-        payload = {
-            **hidden,
-            "ctl00$cphMain$rblRealTangible": "R",
-            "ctl00$cphMain$txtOwnerName": owner_name.strip(),
-            "ctl00$cphMain$txtStreet": address.strip(),
-            "ctl00$cphMain$txtCity": city.strip(),
-            "ctl00$cphMain$txtAlternateKey": "",
-            "ctl00$cphMain$txtBook": "",
-            "ctl00$cphMain$txtPage": "",
-            "ctl00$cphMain$txtSubdivisionName": subdivision.strip(),
-            "ctl00$cphMain$txtPropertyName": "",
-            "ctl00$cphMain$btnSearch": "Search",
-        }
-        self._throttle()
-        resp = self.session.post(BASE_URL + SEARCH_PATH, data=payload, timeout=30)
-        resp.raise_for_status()
-        body = resp.text
-        if "no results found" in body.lower():
-            logger.info("PA: no results owner=%r sub=%r addr=%r",
-                        owner_name, subdivision, address)
+        self._page.goto(SEARCH_URL, wait_until="domcontentloaded")
+        try:
+            self._page.fill("#cphMain_txtOwnerName", owner_name.strip())
+            if subdivision:
+                sel = self._page.query_selector("#cphMain_txtSubdivisionName")
+                if sel is not None:
+                    sel.fill(subdivision.strip())
+            self._page.click("#cphMain_btnSearch")
+            self._page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception as e:
+            logger.warning("PA: form interaction failed owner=%r sub=%r err=%s",
+                           owner_name, subdivision, e)
             return []
-        soup = BeautifulSoup(body, "html.parser")
+
+        body = self._page.content()
+        if "no results found" in body.lower():
+            logger.info("PA: no results owner=%r sub=%r", owner_name, subdivision)
+            return []
+
         alt_keys: List[str] = []
-        for a in soup.find_all("a", href=True):
-            m = re.search(r'AltKey=(\d+)', a["href"])
-            if m:
-                key = m.group(1)
-                if key not in alt_keys:
-                    alt_keys.append(key)
-        if not alt_keys:
-            snippet = re.sub(r'\s+', ' ', body)[:300]
-            logger.warning("PA: 0 alt keys for owner=%r sub=%r snippet=%s",
-                           owner_name, subdivision, snippet)
-        else:
+        try:
+            links = self._page.query_selector_all("a[href*=\"AltKey=\"]")
+            for link in links:
+                href = link.get_attribute("href") or ""
+                m = re.search(r'AltKey=(\d+)', href)
+                if m:
+                    key = m.group(1)
+                    if key not in alt_keys:
+                        alt_keys.append(key)
+        except Exception as e:
+            logger.warning("PA: link extraction failed: %s", e)
+
+        if alt_keys:
             logger.info("PA: owner=%r sub=%r -> %d alt keys",
                         owner_name, subdivision, len(alt_keys))
+        else:
+            logger.warning("PA: 0 alt keys for owner=%r sub=%r",
+                           owner_name, subdivision)
         return alt_keys
 
     def search_by_owner(self, owner_name: str) -> List[str]:
@@ -146,19 +164,21 @@ class LakePropertyAppraiser:
         cached = self._cache_get(f"detail:{alt_key}")
         if cached is not None:
             return cached
+        self._ensure_browser()
         self._throttle()
-        resp = self.session.get(BASE_URL + DETAIL_PATH,
-                                params={"AltKey": alt_key}, timeout=30)
-        if resp.status_code != 200:
-            logger.warning("PA detail failed alt_key=%s status=%d",
-                           alt_key, resp.status_code)
+        try:
+            self._page.goto(f"{DETAIL_URL}?AltKey={alt_key}", wait_until="domcontentloaded")
+        except Exception as e:
+            logger.warning("PA detail nav failed alt_key=%s err=%s", alt_key, e)
             self._cache_put(f"detail:{alt_key}", None)
             return None
-        record = self._parse_detail_page(resp.text, alt_key)
+        html = self._page.content()
+        record = self._parse_detail_page(html, alt_key)
         self._cache_put(f"detail:{alt_key}", record)
         return record
 
     def _parse_detail_page(self, html: str, alt_key: str) -> PropertyRecord:
+        from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
         record = PropertyRecord(alt_key=alt_key)
         fields: Dict[str, str] = {}
@@ -197,7 +217,6 @@ class LakePropertyAppraiser:
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
-
         alt_keys: List[str] = []
         matched_via = "owner_name"
         if subdivision and owner_name:
@@ -210,11 +229,9 @@ class LakePropertyAppraiser:
             alt_keys = self.search_by_subdivision_and_owner(subdivision, "")
             if alt_keys:
                 matched_via = "subdivision_only"
-
         if not alt_keys:
             self._cache_put(cache_key, None)
             return None
-
         primary = self.get_details(alt_keys[0])
         if primary is not None:
             primary.matched_via = matched_via
@@ -249,7 +266,6 @@ class LakePropertyAppraiser:
 
 
 def _parse_subdivision(str_code: str) -> str:
-    """Extract subdivision name from clerk Doc Legal like 'LT 229 RESERVES AT HAMMOCK OAKS PH 2A'."""
     if not str_code:
         return ""
     s = str_code.upper().strip()
