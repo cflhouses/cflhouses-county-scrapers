@@ -1,16 +1,4 @@
-"""
-Lake County Property Appraiser - real implementation.
-
-Flow:
-    1. GET /property-search.aspx -> extract ASP.NET hidden state fields
-    2. POST with owner name + hidden fields -> HTML result table
-    3. Parse table rows for Alt Keys
-    4. For each Alt Key: GET /property-details.aspx?AltKey=X
-    5. Parse detail page into PropertyRecord
-
-Book/Page search was tested and does NOT work for code-enforcement liens -
-the PA only indexes ownership transfer deeds on Book/Page.
-"""
+"""Lake County Property Appraiser - real implementation with subdivision matching."""
 from __future__ import annotations
 
 import logging
@@ -50,8 +38,6 @@ class PropertyRecord:
 
 
 class LakePropertyAppraiser:
-    """Live HTTP client against the Lake County Property Appraiser."""
-
     def __init__(self, cache_ttl_days: int = 30, rate_limit_seconds: float = 3.0):
         self.cache_ttl = timedelta(days=cache_ttl_days)
         self.rate_limit_seconds = rate_limit_seconds
@@ -86,11 +72,8 @@ class LakePropertyAppraiser:
             return
         self._throttle()
         try:
-            self.session.get(
-                BASE_URL + DISCLAIMER_PATH,
-                params={"to": SEARCH_PATH},
-                timeout=30,
-            )
+            self.session.get(BASE_URL + DISCLAIMER_PATH,
+                             params={"to": SEARCH_PATH}, timeout=30)
         except requests.RequestException as e:
             logger.warning("Disclaimer GET failed (continuing): %s", e)
         self._disclaimer_accepted = True
@@ -105,7 +88,9 @@ class LakePropertyAppraiser:
                 fields[name] = el.get("value", "") or ""
         return fields
 
-    def search_by_owner(self, owner_name: str) -> List[str]:
+    def _search(self, owner_name: str = "", subdivision: str = "",
+                address: str = "", city: str = "") -> List[str]:
+        """Submit search form POST and return Alt Keys from result page."""
         if not self._disclaimer_accepted:
             self.accept_disclaimer()
         self._throttle()
@@ -117,22 +102,24 @@ class LakePropertyAppraiser:
             **hidden,
             "ctl00$cphMain$rblRealTangible": "R",
             "ctl00$cphMain$txtOwnerName": owner_name.strip(),
-            "ctl00$cphMain$txtStreet": "",
-            "ctl00$cphMain$txtCity": "",
+            "ctl00$cphMain$txtStreet": address.strip(),
+            "ctl00$cphMain$txtCity": city.strip(),
             "ctl00$cphMain$txtAlternateKey": "",
             "ctl00$cphMain$txtBook": "",
             "ctl00$cphMain$txtPage": "",
-            "ctl00$cphMain$txtSubdivisionName": "",
+            "ctl00$cphMain$txtSubdivisionName": subdivision.strip(),
             "ctl00$cphMain$txtPropertyName": "",
             "ctl00$cphMain$btnSearch": "Search",
         }
         self._throttle()
         resp = self.session.post(BASE_URL + SEARCH_PATH, data=payload, timeout=30)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        if "no results found" in resp.text.lower():
-            logger.info("PA: no results for owner=%r", owner_name)
+        body = resp.text
+        if "no results found" in body.lower():
+            logger.info("PA: no results owner=%r sub=%r addr=%r",
+                        owner_name, subdivision, address)
             return []
+        soup = BeautifulSoup(body, "html.parser")
         alt_keys: List[str] = []
         for a in soup.find_all("a", href=True):
             m = re.search(r'AltKey=(\d+)', a["href"])
@@ -140,8 +127,20 @@ class LakePropertyAppraiser:
                 key = m.group(1)
                 if key not in alt_keys:
                     alt_keys.append(key)
-        logger.info("PA: owner=%r returned %d alt keys", owner_name, len(alt_keys))
+        if not alt_keys:
+            snippet = re.sub(r'\s+', ' ', body)[:300]
+            logger.warning("PA: 0 alt keys for owner=%r sub=%r snippet=%s",
+                           owner_name, subdivision, snippet)
+        else:
+            logger.info("PA: owner=%r sub=%r -> %d alt keys",
+                        owner_name, subdivision, len(alt_keys))
         return alt_keys
+
+    def search_by_owner(self, owner_name: str) -> List[str]:
+        return self._search(owner_name=owner_name)
+
+    def search_by_subdivision_and_owner(self, subdivision: str, owner_name: str = "") -> List[str]:
+        return self._search(owner_name=owner_name, subdivision=subdivision)
 
     def get_details(self, alt_key: str) -> Optional[PropertyRecord]:
         cached = self._cache_get(f"detail:{alt_key}")
@@ -151,7 +150,7 @@ class LakePropertyAppraiser:
         resp = self.session.get(BASE_URL + DETAIL_PATH,
                                 params={"AltKey": alt_key}, timeout=30)
         if resp.status_code != 200:
-            logger.warning("PA detail fetch failed alt_key=%s status=%d",
+            logger.warning("PA detail failed alt_key=%s status=%d",
                            alt_key, resp.status_code)
             self._cache_put(f"detail:{alt_key}", None)
             return None
@@ -193,17 +192,32 @@ class LakePropertyAppraiser:
         return record
 
     def lookup_by_owner(self, owner_name: str, str_code: Optional[str] = None) -> Optional[PropertyRecord]:
-        cache_key = f"owner:{owner_name}"
+        subdivision = _parse_subdivision(str_code) if str_code else ""
+        cache_key = f"owner:{owner_name}|sub:{subdivision}"
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
-        alt_keys = self.search_by_owner(owner_name)
+
+        alt_keys: List[str] = []
+        matched_via = "owner_name"
+        if subdivision and owner_name:
+            alt_keys = self.search_by_subdivision_and_owner(subdivision, owner_name)
+            if alt_keys:
+                matched_via = "owner+subdivision"
+        if not alt_keys and owner_name:
+            alt_keys = self.search_by_owner(owner_name)
+        if not alt_keys and subdivision:
+            alt_keys = self.search_by_subdivision_and_owner(subdivision, "")
+            if alt_keys:
+                matched_via = "subdivision_only"
+
         if not alt_keys:
             self._cache_put(cache_key, None)
             return None
+
         primary = self.get_details(alt_keys[0])
         if primary is not None:
-            primary.matched_via = "owner_name"
+            primary.matched_via = matched_via
             primary.alternate_matches = len(alt_keys) - 1
         self._cache_put(cache_key, primary)
         return primary
@@ -227,11 +241,24 @@ class LakePropertyAppraiser:
             r = self.lookup_by_parcel_id(parcel_id)
             if r:
                 return r
-        if owner_name:
-            r = self.lookup_by_owner(owner_name, str_code=str_code)
+        if owner_name or str_code:
+            r = self.lookup_by_owner(owner_name or "", str_code=str_code)
             if r:
                 return r
         return None
+
+
+def _parse_subdivision(str_code: str) -> str:
+    """Extract subdivision name from clerk Doc Legal like 'LT 229 RESERVES AT HAMMOCK OAKS PH 2A'."""
+    if not str_code:
+        return ""
+    s = str_code.upper().strip()
+    s = re.sub(r'^LT\s+\d+[A-Z]?\s+', '', s)
+    s = re.sub(r'\s+(PH|PHASE|BLK|BLOCK|UNIT|SEC|ETC\.?).*$', '', s)
+    s = s.strip()
+    if len(s) < 3 or not re.search(r'[A-Z]', s):
+        return ""
+    return s
 
 
 def _extract_year(html: str) -> str:
@@ -252,4 +279,3 @@ def _extract_just_value(html: str) -> str:
 def _extract_property_use(html: str) -> str:
     m = re.search(r'Property\s*Use[^<]*<[^>]+>\s*([^<\n]+)', html, re.IGNORECASE)
     return (m.group(1).strip() if m else "")[:60]
-
