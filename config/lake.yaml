@@ -1,5 +1,4 @@
-# Lake County, Florida — scraper configuration
-# This file drives the Lake-specific behavior of the generic OnCore Acclaim base client.
+# Lake County, Florida - scraper configuration
 
 county: Lake
 state: FL
@@ -45,7 +44,19 @@ doc_types:
       id: 32
       name: "JDGMT/ASGMT SATISFACTION"
 
-code_enforcement_filer_regex: '^(CITY OF |TOWN OF |VILLAGE OF |LAKE COUNTY |MUNICIPALITY OF ).+|.*POL SUBDIVISION.*|.*CODE ENFORCEMENT.*'
+# Regex pattern for Indirect Name - matches only ACTUAL code enforcement filings.
+code_enforcement_filer_regex: '^(CITY OF |TOWN OF |VILLAGE OF |MUNICIPALITY OF )[A-Z][A-Z ]+$|.*CODE ENFORCEMENT.*|^LAKE COUNTY POL SUBDIVISION$|^LAKE COUNTY BOARD OF COUNTY COMMISSIONERS$'
+
+# Explicit exclusion list - filer indirect_name containing any of these is NOT CE
+filer_exclude_keywords:
+  - "TAX COLLECTOR"
+  - "CLERK OF THE COURT"
+  - "CLERK OF COURT"
+  - "SHERIFF"
+  - "TREASURER"
+  - "STATE OF FLORIDA"
+  - "UNITED STATES"
+  - "INTERNAL REVENUE"
 
 known_filers:
   - "CITY OF CLERMONT"
